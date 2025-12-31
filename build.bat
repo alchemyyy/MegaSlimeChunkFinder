@@ -37,7 +37,7 @@ echo Compiling with AVX-512 optimizations...
 echo.
 
 REM Compile with maximum optimizations
-cl /std:c++17 /O2 /Oi /Ot /GL /arch:AVX512 /favor:INTEL64 /EHsc /nologo /Fe:slimechunkfinder.exe slimechunkfinder.cpp /link /LTCG
+cl /std:c++17 /O2 /Oi /Ot /GL /arch:AVX512 /favor:INTEL64 /EHsc /nologo /Fe:megaslimechunkfinder.exe megaslimechunkfinder.cpp /link /LTCG
 
 if %ERRORLEVEL% EQU 0 (
     echo.
@@ -45,9 +45,9 @@ if %ERRORLEVEL% EQU 0 (
     echo Compilation SUCCESSFUL!
     echo ========================================
     echo.
-    echo Executable: slimechunkfinder.exe
+    echo Executable: megaslimechunkfinder.exe
     echo.
-    echo To run: slimechunkfinder.exe
+    echo To run: megaslimechunkfinder.exe
     echo Press Ctrl+C while running to see stats
     echo.
 ) else (

@@ -14,15 +14,7 @@
 #include <cstring>
 
 // ==================== CONFIGURATION ====================
-constexpr int64_t MINIMUM_RECT_DIMENSION = 3;  // Minimum width AND height for rectangles
-constexpr int64_t WORLD_SEED = 413563856LL;    // Minecraft world seed
 constexpr int64_t WORK_UNIT_SIZE = 256;         // Size of each work unit in chunks
-
-// Search bounds (in blocks) - can be overridden via command line
-int64_t SEARCH_MIN_X = -10000000;  // -50000 chunks * 16
-int64_t SEARCH_MAX_X = 10000000;   // 50000 chunks * 16
-int64_t SEARCH_MIN_Z = -10000000;  // -50000 chunks * 16
-int64_t SEARCH_MAX_Z = 10000000;   // 50000 chunks * 16
 
 // ==================== AVX-512 SLIME CHUNK DETECTION ====================
 
@@ -104,21 +96,13 @@ struct Rectangle {
     }
 };
 
-std::mutex resultsMutex;
-std::set<Rectangle> foundRectangles;
-std::atomic<bool> pauseFlag{false};
-std::atomic<int64_t> chunksProcessed{0};
-std::atomic<int64_t> maxDistanceReached{0};
-
-// Work queue system
-std::mutex workQueueMutex;
-std::vector<std::pair<std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>> workQueue; // ((minX, maxX), (minZ, maxZ))
-std::atomic<int64_t> workQueueIndex{0};
-
 // Ultra-fast rectangle detection using maximal rectangle algorithm
 void findMaximalRectangles(const std::vector<std::vector<bool>>& grid, 
                            int64_t startRow, int64_t endRow,
-                           int64_t offsetX, int64_t offsetZ) {
+                           int64_t offsetX, int64_t offsetZ,
+                           int64_t minimumRectDimension,
+                           std::mutex& resultsMutex,
+                           std::set<Rectangle>& foundRectangles) {
     
     if (grid.empty()) return;
     
@@ -175,7 +159,7 @@ void findMaximalRectangles(const std::vector<std::vector<bool>>& grid,
                 int64_t h = minHeight;
                 
                 // Report all rectangles that meet minimum size requirement
-                if (width >= MINIMUM_RECT_DIMENSION && h >= MINIMUM_RECT_DIMENSION) {
+                if (width >= minimumRectDimension && h >= minimumRectDimension) {
                     candidateCount++;
                     Rectangle rect;
                     rect.x = offsetX + i;
@@ -212,20 +196,26 @@ void findMaximalRectangles(const std::vector<std::vector<bool>>& grid,
 }
 
 // Process a rectangular region with overlap padding to catch boundary rectangles
-void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
+void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ,
+                   int64_t worldSeed,
+                   int64_t minimumRectDimension,
+                   int64_t searchMinX, int64_t searchMaxX, int64_t searchMinZ, int64_t searchMaxZ,
+                   std::mutex& resultsMutex,
+                   std::set<Rectangle>& foundRectangles,
+                   std::atomic<int64_t>& chunksProcessed) {
     // Debug
     bool isDebugRegion2 = (minX <= 1495 && maxX > 1495 && minZ <= 8284 && maxZ > 8284);
     if (isDebugRegion2) {
         std::lock_guard<std::mutex> lock(resultsMutex);
         std::cout << "[DEBUG] processRegion input: X[" << minX << "-" << maxX << "] Z[" << minZ << "-" << maxZ << "]\n";
-        std::cout << "[DEBUG] SEARCH bounds (chunks): X[" << (SEARCH_MIN_X/16) << "-" << (SEARCH_MAX_X/16) << "] Z[" << (SEARCH_MIN_Z/16) << "-" << (SEARCH_MAX_Z/16) << "]\n";
+        std::cout << "[DEBUG] SEARCH bounds (chunks): X[" << (searchMinX/16) << "-" << (searchMaxX/16) << "] Z[" << (searchMinZ/16) << "-" << (searchMaxZ/16) << "]\n";
     }
     
     // Add padding to ensure rectangles on boundaries aren't missed
-    int64_t paddedMinX = minX - MINIMUM_RECT_DIMENSION + 1;
-    int64_t paddedMaxX = maxX + MINIMUM_RECT_DIMENSION - 1;
-    int64_t paddedMinZ = minZ - MINIMUM_RECT_DIMENSION + 1;
-    int64_t paddedMaxZ = maxZ + MINIMUM_RECT_DIMENSION - 1;
+    int64_t paddedMinX = minX - minimumRectDimension + 1;
+    int64_t paddedMaxX = maxX + minimumRectDimension - 1;
+    int64_t paddedMinZ = minZ - minimumRectDimension + 1;
+    int64_t paddedMaxZ = maxZ + minimumRectDimension - 1;
     
     if (isDebugRegion2) {
         std::lock_guard<std::mutex> lock(resultsMutex);
@@ -233,10 +223,10 @@ void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
     }
     
     // Clamp to search bounds (convert block bounds to chunk bounds)
-    int64_t searchMinChunkX = SEARCH_MIN_X / 16;
-    int64_t searchMaxChunkX = SEARCH_MAX_X / 16;
-    int64_t searchMinChunkZ = SEARCH_MIN_Z / 16;
-    int64_t searchMaxChunkZ = SEARCH_MAX_Z / 16;
+    int64_t searchMinChunkX = searchMinX / 16;
+    int64_t searchMaxChunkX = searchMaxX / 16;
+    int64_t searchMinChunkZ = searchMinZ / 16;
+    int64_t searchMaxChunkZ = searchMaxZ / 16;
     
     paddedMinX = std::max(paddedMinX, searchMinChunkX);
     paddedMaxX = std::min(paddedMaxX, searchMaxChunkX);
@@ -251,7 +241,7 @@ void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
     int64_t width = paddedMaxX - paddedMinX;
     int64_t height = paddedMaxZ - paddedMinZ;
     
-    if (width < MINIMUM_RECT_DIMENSION || height < MINIMUM_RECT_DIMENSION) {
+    if (width < minimumRectDimension || height < minimumRectDimension) {
         return;
     }
     
@@ -291,7 +281,7 @@ void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
             
             // Process batch of 8 chunks with AVX-512
             if (batchIdx == 8) {
-                isSlimeChunkBatch8(chunkXBatch, chunkZBatch, WORLD_SEED, resultsBatch);
+                isSlimeChunkBatch8(chunkXBatch, chunkZBatch, worldSeed, resultsBatch);
                 
                 for (int64_t i = 0; i < 8; i++) {
                     grid[gridZBatch[i]][gridXBatch[i]] = resultsBatch[i];
@@ -318,7 +308,7 @@ void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
             chunkZBatch[i] = 0;
         }
         
-        isSlimeChunkBatch8(chunkXBatch, chunkZBatch, WORLD_SEED, resultsBatch);
+        isSlimeChunkBatch8(chunkXBatch, chunkZBatch, worldSeed, resultsBatch);
         
         for (int64_t i = 0; i < batchIdx; i++) {
             grid[gridZBatch[i]][gridXBatch[i]] = resultsBatch[i];
@@ -335,7 +325,7 @@ void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
     
     // Find rectangles in this grid
     int64_t beforeCount = foundRectangles.size();
-    findMaximalRectangles(grid, 0, height, paddedMinX, paddedMinZ);
+    findMaximalRectangles(grid, 0, height, paddedMinX, paddedMinZ, minimumRectDimension, resultsMutex, foundRectangles);
     int64_t afterCount = foundRectangles.size();
     
     // Debug output for test region
@@ -353,7 +343,8 @@ void processRegion(int64_t minX, int64_t maxX, int64_t minZ, int64_t maxZ) {
 }
 
 // Generate work queue sorted by distance from origin
-void generateWorkQueue() {
+void generateWorkQueue(int64_t searchMinX, int64_t searchMaxX, int64_t searchMinZ, int64_t searchMaxZ,
+                       std::vector<std::pair<std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>>& workQueue) {
     struct WorkUnit {
         int64_t minX, maxX, minZ, maxZ;
         int64_t distSquared;
@@ -362,10 +353,10 @@ void generateWorkQueue() {
     std::vector<WorkUnit> units;
     
     // Convert block bounds to chunk bounds
-    int64_t searchMinChunkX = SEARCH_MIN_X / 16;
-    int64_t searchMaxChunkX = SEARCH_MAX_X / 16;
-    int64_t searchMinChunkZ = SEARCH_MIN_Z / 16;
-    int64_t searchMaxChunkZ = SEARCH_MAX_Z / 16;
+    int64_t searchMinChunkX = searchMinX / 16;
+    int64_t searchMaxChunkX = searchMaxX / 16;
+    int64_t searchMinChunkZ = searchMinZ / 16;
+    int64_t searchMaxChunkZ = searchMaxZ / 16;
     
     // Generate all work units (in chunks)
     for (int64_t x = searchMinChunkX; x < searchMaxChunkX; x += WORK_UNIT_SIZE) {
@@ -398,7 +389,17 @@ void generateWorkQueue() {
 }
 
 // Worker thread - grabs work from queue dynamically
-void workerThread(int64_t threadId, int64_t numThreads) {
+void workerThread(int64_t threadId, int64_t numThreads,
+                  int64_t worldSeed,
+                  int64_t minimumRectDimension,
+                  int64_t searchMinX, int64_t searchMaxX, int64_t searchMinZ, int64_t searchMaxZ,
+                  std::mutex& resultsMutex,
+                  std::set<Rectangle>& foundRectangles,
+                  std::atomic<bool>& pauseFlag,
+                  std::atomic<int64_t>& chunksProcessed,
+                  std::atomic<int64_t>& maxDistanceReached,
+                  std::vector<std::pair<std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>>& workQueue,
+                  std::atomic<int64_t>& workQueueIndex) {
     while (!pauseFlag) {
         // Atomically grab next work unit
         int64_t idx = workQueueIndex.fetch_add(1, std::memory_order_relaxed);
@@ -420,7 +421,9 @@ void workerThread(int64_t threadId, int64_t numThreads) {
                       << "] Z[" << minZ << "-" << maxZ << "]\n";
         }
         
-        processRegion(minX, maxX, minZ, maxZ);
+        processRegion(minX, maxX, minZ, maxZ, worldSeed, minimumRectDimension,
+                     searchMinX, searchMaxX, searchMinZ, searchMaxZ,
+                     resultsMutex, foundRectangles, chunksProcessed);
         
         // Update max distance
         int64_t centerX = (minX + maxX) / 2;
@@ -436,13 +439,19 @@ void workerThread(int64_t threadId, int64_t numThreads) {
 }
 
 // ==================== SIGNAL HANDLING ====================
+// Global pause flag for signal handler (needs to be global for signal handling)
+std::atomic<bool>* g_pauseFlag = nullptr;
+
 void signalHandler(int signal) {
-    if (signal == SIGINT) {
-        pauseFlag = true;
+    if (signal == SIGINT && g_pauseFlag != nullptr) {
+        g_pauseFlag->store(true);
     }
 }
 
-void printStats(bool toFile = false) {
+void printStats(const std::atomic<int64_t>& chunksProcessed,
+                const std::atomic<int64_t>& maxDistanceReached,
+                const std::set<Rectangle>& foundRectangles,
+                bool toFile = false) {
     std::ostream* out = &std::cout;
     std::ofstream fileOut;
     
@@ -502,8 +511,9 @@ void printStats(bool toFile = false) {
 
 // ==================== UNIT TESTS ====================
 bool runUnitTests() {
-    // Set test-specific world seed
+    // Set test-specific configuration
     const int64_t TEST_WORLD_SEED = 413563856LL;
+    const int64_t TEST_MINIMUM_RECT_DIMENSION = 3;
     
     std::cout << "Running unit tests...\n";
     std::cout << "========================================\n";
@@ -525,34 +535,36 @@ bool runUnitTests() {
     
     // Set search bounds to small area around the test case (with padding room)
     // Test is at chunk (1495, 8282-8284), convert to blocks and add padding
-    SEARCH_MIN_X = 1200 * 16;  // Allow padding room before work unit
-    SEARCH_MAX_X = 1600 * 16;  // Allow padding room after work unit
-    SEARCH_MIN_Z = 8100 * 16;  // Allow padding room
-    SEARCH_MAX_Z = 8500 * 16;  // Allow padding room
+    int64_t testSearchMinX = 1200 * 16;  // Allow padding room before work unit
+    int64_t testSearchMaxX = 1600 * 16;  // Allow padding room after work unit
+    int64_t testSearchMinZ = 8100 * 16;  // Allow padding room
+    int64_t testSearchMaxZ = 8500 * 16;  // Allow padding room
     
-    std::cout << "Search bounds (blocks): X[" << SEARCH_MIN_X << " to " << SEARCH_MAX_X 
-              << "] Z[" << SEARCH_MIN_Z << " to " << SEARCH_MAX_Z << "]\n";
-    std::cout << "Search bounds (chunks): X[" << (SEARCH_MIN_X/16) << " to " << (SEARCH_MAX_X/16)
-              << "] Z[" << (SEARCH_MIN_Z/16) << " to " << (SEARCH_MAX_Z/16) << "]\n";
+    std::cout << "Search bounds (blocks): X[" << testSearchMinX << " to " << testSearchMaxX 
+              << "] Z[" << testSearchMinZ << " to " << testSearchMaxZ << "]\n";
+    std::cout << "Search bounds (chunks): X[" << (testSearchMinX/16) << " to " << (testSearchMaxX/16)
+              << "] Z[" << (testSearchMinZ/16) << " to " << (testSearchMaxZ/16) << "]\n";
     
-    // Clear previous results
-    {
-        std::lock_guard<std::mutex> lock(resultsMutex);
-        foundRectangles.clear();
-    }
-    workQueueIndex = 0;
-    workQueue.clear();
-    chunksProcessed = 0;
-    maxDistanceReached = 0;
+    // Create local state variables
+    std::mutex resultsMutex;
+    std::set<Rectangle> foundRectangles;
+    std::atomic<bool> pauseFlag{false};
+    std::atomic<int64_t> chunksProcessed{0};
+    std::atomic<int64_t> maxDistanceReached{0};
+    std::vector<std::pair<std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>> workQueue;
+    std::atomic<int64_t> workQueueIndex{0};
     
     // Generate work queue for this small region
     std::cout << "Generating work queue...\n";
-    generateWorkQueue();
+    generateWorkQueue(testSearchMinX, testSearchMaxX, testSearchMinZ, testSearchMaxZ, workQueue);
     std::cout << "Work units: " << workQueue.size() << "\n\n";
     
     // Run single-threaded for easier debugging
     std::cout << "Processing work units...\n";
-    workerThread(0, 1);
+    workerThread(0, 1, TEST_WORLD_SEED, TEST_MINIMUM_RECT_DIMENSION,
+                 testSearchMinX, testSearchMaxX, testSearchMinZ, testSearchMaxZ,
+                 resultsMutex, foundRectangles, pauseFlag, chunksProcessed, maxDistanceReached,
+                 workQueue, workQueueIndex);
     
     // Check results
     std::cout << "\nRectangles found: " << foundRectangles.size() << "\n";
@@ -591,6 +603,29 @@ int main(int argc, char* argv[]) {
         return passed ? 0 : 1;
     }
     
+    // Configuration
+    const int64_t WORLD_SEED = 413563856LL;
+    const int64_t MINIMUM_RECT_DIMENSION = 3;
+    
+    // Search bounds (in blocks) - can be overridden via command line
+    int64_t searchMinX = -10000000;  // -50000 chunks * 16
+    int64_t searchMaxX = 10000000;   // 50000 chunks * 16
+    int64_t searchMinZ = -10000000;  // -50000 chunks * 16
+    int64_t searchMaxZ = 10000000;   // 50000 chunks * 16
+    
+    // State variables
+    std::mutex resultsMutex;
+    std::set<Rectangle> foundRectangles;
+    std::atomic<bool> pauseFlag{false};
+    std::atomic<int64_t> chunksProcessed{0};
+    std::atomic<int64_t> maxDistanceReached{0};
+    std::vector<std::pair<std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>>> workQueue;
+    std::atomic<int64_t> workQueueIndex{0};
+    
+    // Set up signal handler
+    g_pauseFlag = &pauseFlag;
+    signal(SIGINT, signalHandler);
+    
     // Detect number of logical cores
     int64_t NUM_THREADS = std::thread::hardware_concurrency();
     if (NUM_THREADS == 0) {
@@ -601,27 +636,29 @@ int main(int argc, char* argv[]) {
     std::cout << "==========================================================\n";
     std::cout << "World Seed: " << WORLD_SEED << "\n";
     std::cout << "CPU Cores Detected: " << NUM_THREADS << "\n";
-    std::cout << "Search Bounds (blocks): X[" << SEARCH_MIN_X << " to " << SEARCH_MAX_X 
-              << "] Z[" << SEARCH_MIN_Z << " to " << SEARCH_MAX_Z << "]\n";
-    std::cout << "Search Bounds (chunks): X[" << (SEARCH_MIN_X/16) << " to " << (SEARCH_MAX_X/16)
-              << "] Z[" << (SEARCH_MIN_Z/16) << " to " << (SEARCH_MAX_Z/16) << "]\n";
+    std::cout << "Search Bounds (blocks): X[" << searchMinX << " to " << searchMaxX 
+              << "] Z[" << searchMinZ << " to " << searchMaxZ << "]\n";
+    std::cout << "Search Bounds (chunks): X[" << (searchMinX/16) << " to " << (searchMaxX/16)
+              << "] Z[" << (searchMinZ/16) << " to " << (searchMaxZ/16) << "]\n";
     std::cout << "Work Unit Size: " << WORK_UNIT_SIZE << " chunks\n";
     std::cout << "Min Rectangle Dimension: " << MINIMUM_RECT_DIMENSION << "x" << MINIMUM_RECT_DIMENSION << "\n";
     std::cout << "SIMD: AVX-512 8-wide vectorization enabled\n";
     std::cout << "Press Ctrl+C to pause and view stats\n\n";
     
-    signal(SIGINT, signalHandler);
-    
     // Generate work queue sorted by distance from origin
     std::cout << "Generating work queue...\n";
-    generateWorkQueue();
+    generateWorkQueue(searchMinX, searchMaxX, searchMinZ, searchMaxZ, workQueue);
     std::cout << "Work queue ready: " << workQueue.size() << " units\n\n";
     
     auto startTime = std::chrono::high_resolution_clock::now();
     
     std::vector<std::thread> threads;
     for (int64_t i = 0; i < NUM_THREADS; i++) {
-        threads.emplace_back(workerThread, i, NUM_THREADS);
+        threads.emplace_back(workerThread, i, NUM_THREADS, WORLD_SEED, MINIMUM_RECT_DIMENSION,
+                           searchMinX, searchMaxX, searchMinZ, searchMaxZ,
+                           std::ref(resultsMutex), std::ref(foundRectangles),
+                           std::ref(pauseFlag), std::ref(chunksProcessed), std::ref(maxDistanceReached),
+                           std::ref(workQueue), std::ref(workQueueIndex));
     }
     
     // Monitor thread
@@ -639,7 +676,7 @@ int main(int argc, char* argv[]) {
                           << " | Found: " << foundRectangles.size() << "    \r" << std::flush;
                 
                 // Write current results to file
-                printStats(true);
+                printStats(chunksProcessed, maxDistanceReached, foundRectangles, true);
             }
         }
     });
@@ -654,10 +691,13 @@ int main(int argc, char* argv[]) {
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
     
-    printStats();
+    printStats(chunksProcessed, maxDistanceReached, foundRectangles);
     
     std::cout << "Total time: " << duration.count() / 1000.0 << " seconds\n";
     std::cout << "Throughput: " << (chunksProcessed.load() * 1000.0 / duration.count()) << " chunks/sec\n";
+    
+    // Clean up signal handler
+    g_pauseFlag = nullptr;
     
     return 0;
 }
