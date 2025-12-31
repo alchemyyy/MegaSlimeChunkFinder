@@ -502,6 +502,9 @@ void printStats(bool toFile = false) {
 
 // ==================== UNIT TESTS ====================
 bool runUnitTests() {
+    // Set test-specific world seed
+    const int64_t TEST_WORLD_SEED = 413563856LL;
+    
     std::cout << "Running unit tests...\n";
     std::cout << "========================================\n";
     
@@ -511,10 +514,10 @@ bool runUnitTests() {
     std::cout << "Expected: 3x3 at chunk (1495, 8282) = block (23920, 132512)\n\n";
     
     // Verify the 3x3 chunks are actually slime chunks
-    std::cout << "Verifying 3x3 slime chunks with seed " << WORLD_SEED << ":\n";
+    std::cout << "Verifying 3x3 slime chunks with seed " << TEST_WORLD_SEED << ":\n";
     for (int64_t z = 8282; z <= 8284; z++) {
         for (int64_t x = 1495; x <= 1497; x++) {
-            bool isSlime = isSlimeChunk(x, z, WORLD_SEED);
+            bool isSlime = isSlimeChunk(x, z, TEST_WORLD_SEED);
             std::cout << "  Chunk (" << x << ", " << z << "): " << (isSlime ? "SLIME" : "NOT") << "\n";
         }
     }
