@@ -29,32 +29,53 @@ if not defined VSPATH (
 echo Found Visual Studio at: %VSPATH%
 echo.
 
-REM Setup Visual Studio environment
-call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+REM Setup Visual Studio environment (suppress verbose output)
+call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
 
 echo.
-echo Compiling with AVX-512 optimizations...
+echo Compiling main program with AVX-512 optimizations...
 echo.
 
-REM Compile with maximum optimizations
-cl /std:c++17 /O2 /Oi /Ot /GL /arch:AVX512 /favor:INTEL64 /EHsc /nologo /Fe:megaslimechunkfinder.exe megaslimechunkfinder.cpp /link /LTCG
+REM Compile main program with maximum optimizations
+cl /std:c++17 /O2 /Oi /Ot /GL /arch:AVX512 /favor:INTEL64 /EHsc /nologo /Fe:megaslimechunkfinder.exe megaslimechunkfinder.cpp slimechunk_impl.cpp /link /LTCG
 
-if %ERRORLEVEL% EQU 0 (
-    echo.
-    echo ========================================
-    echo Compilation SUCCESSFUL!
-    echo ========================================
-    echo.
-    echo Executable: megaslimechunkfinder.exe
-    echo.
-    echo To run: megaslimechunkfinder.exe
+set MAIN_SUCCESS=%ERRORLEVEL%
+
+echo.
+echo Compiling test program...
+echo.
+
+REM Compile test program
+cl /std:c++17 /O2 /Oi /Ot /GL /arch:AVX512 /favor:INTEL64 /EHsc /nologo /Fe:test_slimechunk.exe test_slimechunk.cpp slimechunk_impl.cpp /link /LTCG
+
+set TEST_SUCCESS=%ERRORLEVEL%
+
+echo.
+echo ========================================
+if %MAIN_SUCCESS% EQU 0 (
+    echo Main program: SUCCESSFUL
+    echo   Executable: megaslimechunkfinder.exe
+) else (
+    echo Main program: FAILED
+)
+
+if %TEST_SUCCESS% EQU 0 (
+    echo Test program: SUCCESSFUL
+    echo   Executable: test_slimechunk.exe
+) else (
+    echo Test program: FAILED
+)
+echo ========================================
+echo.
+
+if %MAIN_SUCCESS% EQU 0 (
+    echo To run main program: megaslimechunkfinder.exe
     echo Press Ctrl+C while running to see stats
     echo.
-) else (
-    echo.
-    echo ========================================
-    echo Compilation FAILED!
-    echo ========================================
+)
+
+if %TEST_SUCCESS% EQU 0 (
+    echo To run tests: test_slimechunk.exe
     echo.
 )
 
